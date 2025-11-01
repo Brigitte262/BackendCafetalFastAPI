@@ -1,10 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from src.routers import catalogs, inventory, kardex, movements
-from src.routers import rrhh as rrhh_router
-from .routers import dashboard
 
-app = FastAPI(title="CAFETAL SAC - Inventario API", version="1.0", debug=True,)
+# importa todos tus routers desde src.routers
+from src.routers import catalogs, inventory, kardex, movements, rrhh, dashboard
+
+app = FastAPI(title="CAFETAL SAC - Inventario API", version="1.0", debug=True)
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,13 +18,11 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
-app.include_router(catalogs.router, prefix="/api/v1", tags=["catalogs"])
-app.include_router(inventory.router, prefix="/api/v1", tags=["inventory"])
-app.include_router(kardex.router, prefix="/api/v1", tags=["kardex"])
-app.include_router(movements.router, prefix="/api/v1", tags=["movements"])
-app.include_router(rrhh_router.router, prefix="/api/v1", tags=["rrhh"])
-app.include_router(dashboard.router, prefix="/api/v1", tags=["dashboard"])
-
-
-
+# registra routers
+app.include_router(catalogs.router,   prefix="/api/v1", tags=["catalogs"])
+app.include_router(inventory.router,  prefix="/api/v1", tags=["inventory"])
+app.include_router(kardex.router,     prefix="/api/v1", tags=["kardex"])
+app.include_router(movements.router,  prefix="/api/v1", tags=["movements"])
+app.include_router(rrhh.router,       prefix="/api/v1", tags=["rrhh"])
+app.include_router(dashboard.router,  prefix="/api/v1", tags=["dashboard"])
 
