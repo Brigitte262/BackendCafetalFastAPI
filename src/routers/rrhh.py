@@ -1,12 +1,13 @@
 
 # src/routers/rrhh.py
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Body
 from fastapi.responses import StreamingResponse
 from typing import Literal, List, Optional, Any, Dict
 from sqlalchemy import text
 from decimal import Decimal
 from datetime import date, datetime
 from fpdf import FPDF
+from pydantic import BaseModel, Field
 import os, hashlib, random, math
 import io
 
@@ -16,6 +17,143 @@ from src.core.db import engine
 
 router = APIRouter(prefix="/rrhh", tags=["rrhh"])
 NOMINA_FAKE = True
+
+# ------------------ Modelos Pydantic ------------------
+class EmployeeBase(BaseModel):
+    doc_id: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    hire_date: date | None = None
+    position_id: int | None = None
+    base_salary: float | None = None
+    status: Literal["ACTIVE", "INACTIVE"] | None = "ACTIVE"
+    contract_type: str | None = None
+    contract_start: date | None = None
+    contract_end: date | None = None
+
+class EmployeeCreate(EmployeeBase):
+    # Requeridos mínimos para crear (ajusta a tu gusto)
+    doc_id: str
+    first_name: str
+    last_name: str
+    hire_date: date
+    base_salary: float
+
+class EmployeeUpdate(EmployeeBase):
+    # PATCH parcial: todos opcionales
+    pass
+
+def _model_data(m: BaseModel) -> dict:
+    # Compatibilidad Pydantic v1/v2
+    return m.model_dump(exclude_unset=True) if hasattr(m, "model_dump") else m.dict(exclude_unset=True)
+
+# ------------------ Crear empleado ------------------
+@router.post("/empleados", status_code=201)
+def create_employee(data: EmployeeCreate):
+    payload = _model_data(data)
+    if not payload.get("status"):
+        payload["status"] = "ACTIVE"
+
+    try:
+        with engine.begin() as conn:
+            new_id = conn.execute(text("""
+                INSERT INTO cafetal.Employee
+                    (doc_id, first_name, last_name, email, phone, hire_date,
+                     position_id, base_salary, status, contract_type, contract_start, contract_end)
+                OUTPUT INSERTED.employee_id
+                VALUES
+                    (:doc_id, :first_name, :last_name, :email, :phone, :hire_date,
+                     :position_id, :base_salary, :status, :contract_type, :contract_start, :contract_end)
+            """), payload).scalar_one()
+    except Exception as e:
+        import traceback; print("ERR POST /empleados:\n", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Reusa tu endpoint de lectura para devolver el registro normalizado
+    return get_employee(int(new_id))
+
+# ------------------ Actualizar (PATCH parcial) ------------------
+@router.patch("/empleados/{emp_id}")
+def update_employee(emp_id: int, data: EmployeeUpdate):
+    payload = _model_data(data)
+    if not payload:
+        raise HTTPException(400, "No enviaste campos para actualizar")
+
+    # Mapea nombres del modelo -> columnas reales
+    field_map = {
+        "doc_id": "doc_id",
+        "first_name": "first_name",
+        "last_name": "last_name",
+        "email": "email",
+        "phone": "phone",
+        "hire_date": "hire_date",
+        "position_id": "position_id",
+        "base_salary": "base_salary",
+        "status": "status",
+        "contract_type": "contract_type",
+        "contract_start": "contract_start",
+        "contract_end": "contract_end",
+    }
+
+    sets, params = [], {"id": emp_id}
+    for k, v in payload.items():
+        col = field_map.get(k)
+        if not col:
+            continue
+        sets.append(f"{col} = :{k}")
+        params[k] = v
+
+    if not sets:
+        raise HTTPException(400, "Los campos enviados no son válidos")
+
+    sql = f"UPDATE cafetal.Employee SET {', '.join(sets)} WHERE employee_id = :id"
+
+    try:
+        with engine.begin() as conn:
+            exists = conn.execute(text("SELECT 1 FROM cafetal.Employee WHERE employee_id=:id"), {"id": emp_id}).first()
+            if not exists:
+                raise HTTPException(404, "Empleado no encontrado")
+            res = conn.execute(text(sql), params)
+            if res.rowcount == 0:
+                raise HTTPException(500, "No se pudo actualizar el empleado")
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; print("ERR PATCH /empleados/{id}:\n", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return get_employee(emp_id)
+
+# ------------------ Eliminar (suave o duro) ------------------
+@router.delete("/empleados/{emp_id}")
+def delete_employee(emp_id: int, hard: bool = Query(False, description="Si true, borra físicamente")):
+    try:
+        with engine.begin() as conn:
+            # verifica existencia
+            row = conn.execute(text("SELECT status FROM cafetal.Employee WHERE employee_id=:id"), {"id": emp_id}).first()
+            if not row:
+                raise HTTPException(404, "Empleado no encontrado")
+
+            if hard:
+                # ⚠️ Podría fallar si hay FKs (p.ej., boletas)
+                res = conn.execute(text("DELETE FROM cafetal.Employee WHERE employee_id=:id"), {"id": emp_id})
+                if res.rowcount == 0:
+                    raise HTTPException(500, "No se pudo eliminar")
+                return {"ok": True, "deleted": True}
+            else:
+                res = conn.execute(text("UPDATE cafetal.Employee SET status='INACTIVE' WHERE employee_id=:id"), {"id": emp_id})
+                if res.rowcount == 0:
+                    raise HTTPException(500, "No se pudo inactivar")
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback; print("ERR DELETE /empleados/{id}:\n", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Devuelve el empleado ya inactivado (coincide con tu shape)
+    return get_employee(emp_id)
 
 def _cast(v):
     if v is None: return None
@@ -512,7 +650,6 @@ def boleta_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
-
 
 
 @router.post("/nomina/generar_pdf")
